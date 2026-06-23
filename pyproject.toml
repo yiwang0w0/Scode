@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "junk"
+version = "0.1.0"
+description = "A reversible legacy-mess obfuscator: inflate clean source into a maintenance nightmare, restore it byte-for-byte with one command."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "junk contributors" }]
+keywords = ["obfuscation", "ast", "reversible", "anti-reverse-engineering"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Software Development :: Code Generators",
+]
+dependencies = []
+
+[project.optional-dependencies]
+redteam = ["anthropic>=0.40"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+junk = "junk.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/yiwang0w0/scode"
+
+[tool.setuptools.packages.find]
+include = ["junk*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-q"
