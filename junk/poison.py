@@ -7,12 +7,24 @@ are located, and standalone comment lines are spliced in at matching
 indentation. Because comments only ever land on statement boundaries and never
 inside a literal, they are behaviour-preserving and the compile gate validates
 the result regardless.
+
+When a :class:`~junk.narrative.Narrative` is supplied, every comment/docstring is
+*rendered from the shared cover story* (keyed by the entity it sits on) instead
+of being a random pick from the flat fallback lists, so the lie is consistent
+across files. With ``narrative=None`` the behaviour is exactly the legacy flat
+random pass.
 """
 
 from __future__ import annotations
 
 import ast
 import random
+
+from junk.narrative import (
+    render_comment,
+    render_docstring,
+    render_module_docstring,
+)
 
 MISLEADING_DOCSTRINGS = [
     "Thread-safe. Do not call without holding the global registry lock.",
@@ -51,31 +63,87 @@ def _is_docstring(stmt: ast.stmt) -> bool:
     )
 
 
-def poison_docstrings(tree: ast.AST, rng: random.Random) -> None:
+def _set_docstring(node: ast.AST, text: str) -> None:
+    body = getattr(node, "body", None)
+    if not isinstance(body, list):
+        return
+    doc = ast.Expr(value=ast.Constant(text))
+    if body and _is_docstring(body[0]):
+        body[0] = doc
+    else:
+        body.insert(0, doc)
+
+
+def iter_scopes(tree: ast.AST, base: str):
+    """Yield ``(node, entity_key)`` for every def/class, dotted-qualname keyed.
+
+    ``entity_key`` is ``"<base>::<dotted.qualname>"`` so the same entity gets the
+    same narrative binding across surfaces and files.
+    """
+    def walk(node, prefix):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                qual = f"{prefix}.{child.name}" if prefix else child.name
+                yield child, f"{base}::{qual}"
+                yield from walk(child, qual)
+            else:
+                yield from walk(child, prefix)
+
+    yield from walk(tree, "")
+
+
+def poison_docstrings(tree, rng: random.Random, narrative=None, base=None) -> None:
     """Replace or insert misleading docstrings on the module and definitions."""
-    scopes = [tree]
-    scopes += [
-        n for n in ast.walk(tree)
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-    ]
-    for node in scopes:
-        body = getattr(node, "body", None)
-        if not isinstance(body, list):
-            continue
-        doc = ast.Expr(value=ast.Constant(rng.choice(MISLEADING_DOCSTRINGS)))
-        if body and _is_docstring(body[0]):
-            body[0] = doc
-        else:
-            body.insert(0, doc)
+    if narrative is None:
+        scopes = [tree]
+        scopes += [
+            n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        ]
+        for node in scopes:
+            _set_docstring(node, rng.choice(MISLEADING_DOCSTRINGS))
+        return
+
+    _set_docstring(tree, render_module_docstring(narrative, base, rng))
+    for node, key in iter_scopes(tree, base):
+        _set_docstring(node, render_docstring(narrative, narrative.bind(key), rng))
 
 
-def inject_comments(source: str, rng: random.Random, density: float = 0.25) -> str:
+def _scope_ranges(tree: ast.AST, base: str):
+    ranges = []
+    for node, key in iter_scopes(tree, base):
+        start = getattr(node, "lineno", None)
+        end = getattr(node, "end_lineno", start)
+        if start is not None:
+            ranges.append((start, end, key))
+    return ranges
+
+
+def _resolve_key(ranges, lineno: int, base: str) -> str:
+    """Innermost scope whose line range contains ``lineno`` (else the module)."""
+    best = None
+    for start, end, key in ranges:
+        if start <= lineno <= end:
+            span = end - start
+            if best is None or span < best[0]:
+                best = (span, key)
+    return best[1] if best else f"{base}::<module>"
+
+
+def inject_comments(
+    source: str,
+    rng: random.Random,
+    density: float = 0.25,
+    narrative=None,
+    base=None,
+) -> str:
     """Splice misleading standalone comment lines before random statements."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return source
 
+    ranges = _scope_ranges(tree, base) if narrative is not None else None
     lines = source.split("\n")
     insertions: dict[int, list[str]] = {}
     for node in ast.walk(tree):
@@ -87,8 +155,12 @@ def inject_comments(source: str, rng: random.Random, density: float = 0.25) -> s
         if rng.random() >= density:
             continue
         indent = " " * getattr(node, "col_offset", 0)
-        comment = f"{indent}# {rng.choice(MISLEADING_COMMENTS)}"
-        insertions.setdefault(lineno, []).append(comment)
+        if narrative is not None:
+            key = _resolve_key(ranges, lineno, base)
+            text = render_comment(narrative, narrative.bind(key), rng)
+        else:
+            text = rng.choice(MISLEADING_COMMENTS)
+        insertions.setdefault(lineno, []).append(f"{indent}# {text}")
 
     if not insertions:
         return source

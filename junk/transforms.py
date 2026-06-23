@@ -19,6 +19,8 @@ from __future__ import annotations
 import ast
 import random
 
+from junk.narrative import decoy_name, render_test_name
+
 REFLECTION_NAMES = {
     "locals", "globals", "vars", "eval", "exec", "compile", "__import__",
     "getattr", "setattr", "delattr",
@@ -49,11 +51,19 @@ def _is_docstring(stmt: ast.stmt) -> bool:
 # Dead code injection
 # --------------------------------------------------------------------------- #
 
-def _make_dead_block(rng: random.Random) -> ast.If:
-    """Build an ``if False:`` block full of innocuous, never-run statements."""
+def _make_dead_block(rng: random.Random, narrative=None, base=None, idx: int = 0) -> ast.If:
+    """Build an ``if False:`` block full of innocuous, never-run statements.
+
+    With a narrative, the targets are named by :func:`~junk.narrative.decoy_name`
+    so the dead code reads as a load-bearing, story-consistent subsystem rather
+    than obvious junk.
+    """
     body: list[ast.stmt] = []
-    for _ in range(rng.randint(1, 3)):
-        target = junk_name(rng)
+    for j in range(rng.randint(1, 3)):
+        if narrative is not None:
+            target = decoy_name(narrative, f"{base}::dead::{idx}::{j}")
+        else:
+            target = junk_name(rng)
         value = ast.Constant(rng.randint(0, 9999))
         body.append(ast.Assign(targets=[ast.Name(id=target, ctx=ast.Store())], value=value))
     # An extra harmless mutation for flavour.
@@ -72,7 +82,13 @@ def _make_dead_block(rng: random.Random) -> ast.If:
     return ast.If(test=ast.Constant(False), body=body, orelse=[])
 
 
-def inject_dead_code(tree: ast.AST, rng: random.Random, density: float = 0.5) -> None:
+def inject_dead_code(
+    tree: ast.AST,
+    rng: random.Random,
+    density: float = 0.5,
+    narrative=None,
+    base=None,
+) -> None:
     """Insert unreachable ``if False:`` blocks into statement bodies in place."""
     targets: list[tuple[list, str]] = []
     for node in ast.walk(tree):
@@ -85,12 +101,14 @@ def inject_dead_code(tree: ast.AST, rng: random.Random, density: float = 0.5) ->
             ):
                 targets.append((body, field))
 
+    block_idx = 0
     for body, field in targets:
         if rng.random() >= density:
             continue
         start = 1 if (field == "body" and _is_docstring(body[0])) else 0
         idx = rng.randint(start, len(body))
-        body.insert(idx, _make_dead_block(rng))
+        body.insert(idx, _make_dead_block(rng, narrative, base, block_idx))
+        block_idx += 1
 
 
 # --------------------------------------------------------------------------- #
@@ -296,3 +314,29 @@ def reorder_toplevel(tree: ast.Module, rng: random.Random) -> None:
             new_body.append(body[i])
             i += 1
     tree.body = new_body
+
+
+# --------------------------------------------------------------------------- #
+# Narrative-aligned test renaming
+# --------------------------------------------------------------------------- #
+
+def rename_tests(tree: ast.Module, narrative, base) -> None:
+    """Rename top-level ``test_*`` functions to narrative vocabulary, in place.
+
+    Only the identifier and the ``test_`` prefix matter to pytest discovery, so
+    bodies (assertions) are never touched and the suite still exercises the real
+    behaviour. Binding is keyed on the *original* name for stability; collisions
+    within the file are disambiguated.
+    """
+    used: set = set()
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if not node.name.startswith("test_"):
+            continue
+        binding = narrative.bind(f"{base}::{node.name}")
+        new = render_test_name(binding, node.name)
+        while new in used:
+            new += "_x"
+        used.add(new)
+        node.name = new

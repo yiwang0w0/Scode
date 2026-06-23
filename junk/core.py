@@ -64,27 +64,80 @@ def discover_py_files(paths: Sequence[str], root: Path) -> List[Path]:
 # Transformation
 # --------------------------------------------------------------------------- #
 
-def transform_source(source: str, aggressive: bool, seed) -> str:
+def transform_source(
+    source: str,
+    aggressive: bool,
+    seed,
+    narrative=None,
+    base=None,
+    rename_tests: bool = False,
+) -> str:
     """Return an obfuscated rendering of ``source``.
 
     Safe profile (default): unreachable dead code + misleading comments.
     Aggressive: also docstring poisoning, provably-safe local renaming, and
     top-level reordering, with a denser comment pass.
+
+    When ``narrative`` is supplied, comments / docstrings / dead-code names are
+    rendered from the shared cover story (keyed by ``base`` + entity qualname).
+    With ``narrative=None`` the output is byte-identical to the legacy passes.
     """
     rng = random.Random(seed)
     tree = ast.parse(source)
 
+    if narrative is not None and rename_tests:
+        transforms.rename_tests(tree, narrative, base)
+
     if aggressive:
-        poison.poison_docstrings(tree, rng)
+        poison.poison_docstrings(tree, rng, narrative=narrative, base=base)
         transforms.rename_locals(tree, rng)
         transforms.reorder_toplevel(tree, rng)
 
-    transforms.inject_dead_code(tree, rng)
+    transforms.inject_dead_code(tree, rng, narrative=narrative, base=base)
     ast.fix_missing_locations(tree)
     rendered = ast.unparse(tree)
 
-    rendered = poison.inject_comments(rendered, rng, density=0.5 if aggressive else 0.25)
+    rendered = poison.inject_comments(
+        rendered, rng, density=0.5 if aggressive else 0.25, narrative=narrative, base=base
+    )
     return rendered
+
+
+# --------------------------------------------------------------------------- #
+# Narrative helpers
+# --------------------------------------------------------------------------- #
+
+def _is_test_path(key: str) -> bool:
+    parts = key.split("/")
+    name = parts[-1]
+    return "tests" in parts or name.startswith("test_") or name.endswith("_test.py")
+
+
+def _apply_doc_overlay(narrative, root: Path, store, rewrite_readme: bool) -> List[str]:
+    """Write story-consistent decoy docs. Returns the manifest keys touched.
+
+    ``ARCHITECTURE.md`` is generated (a "created" entry that ``restore`` deletes);
+    if it already exists it is snapshotted and overwritten instead. With
+    ``rewrite_readme`` an existing ``README.md`` is snapshotted and replaced too.
+    """
+    from junk import narrative as narrative_mod
+
+    doc_text = narrative_mod.render_architecture_doc(narrative)
+    keys: List[str] = []
+
+    def _emit(target: Path) -> None:
+        if target.exists():
+            store.snapshot(target)
+        else:
+            store.mark_created(target)
+        target.write_text(doc_text, encoding="utf-8")
+        store.mark_obfuscated(target, sha256_bytes(target.read_bytes()))
+        keys.append(store.key_for(target))
+
+    _emit(root / "ARCHITECTURE.md")
+    if rewrite_readme and (root / "README.md").exists():
+        _emit(root / "README.md")
+    return keys
 
 
 # --------------------------------------------------------------------------- #
@@ -104,6 +157,11 @@ def obfuscate(
     seed=None,
     dry_run: bool = False,
     root: Optional[Path] = None,
+    narrative_mode: str = "off",
+    narrative_theme: Optional[str] = None,
+    narrative_refresh: bool = False,
+    rewrite_readme: bool = False,
+    rename_tests: bool = False,
 ) -> ObfuscateResult:
     """Obfuscate files, gate the result, and roll back on failure."""
     root = Path(root or Path.cwd()).resolve()
@@ -130,12 +188,28 @@ def obfuscate(
     if seed is None:
         seed = random.randrange(2 ** 31)
 
+    # Build the shared cover story ONCE over the whole file set (not on dry runs,
+    # which only preview file names and must stay side-effect free).
+    narrative = None
+    if narrative_mode != "off" and not dry_run:
+        from junk import narrative as narrative_mod
+
+        narrative = narrative_mod.build_narrative(
+            files, seed, narrative_mode, root,
+            theme=narrative_theme, refresh=narrative_refresh,
+        )
+
     # Pre-validate every file parses before we touch anything.
     planned = []
     for f in files:
         src = f.read_text(encoding="utf-8")
+        key = store.key_for(f)
         try:
-            new = transform_source(src, aggressive, f"{seed}:{store.key_for(f)}")
+            new = transform_source(
+                src, aggressive, f"{seed}:{key}",
+                narrative=narrative, base=key,
+                rename_tests=(rename_tests and _is_test_path(key)),
+            )
         except SyntaxError as exc:
             return ObfuscateResult(ok=False, reason=f"cannot parse {f}: {exc}")
         planned.append((f, new))
@@ -155,10 +229,20 @@ def obfuscate(
         snapped.append(f)
         f.write_text(new, encoding="utf-8")
 
+    doc_keys: List[str] = []
+    if narrative is not None:
+        from junk import narrative as narrative_mod
+
+        # Persist the now-populated glossary, then emit story-consistent docs.
+        narrative_mod.save_narrative(narrative, root)
+        doc_keys = _apply_doc_overlay(narrative, root, store, rewrite_readme)
+
     ok, msg = gates.run_gates(files, tests, bench, root)
     if not ok:
         for f in snapped:
             store.restore(f)
+        for key in doc_keys:  # deletes created decoys, restores rewritten files
+            store.restore_key(key)
         return ObfuscateResult(ok=False, reason=msg, rolled_back=True)
 
     for f in snapped:

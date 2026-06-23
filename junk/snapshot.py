@@ -97,6 +97,23 @@ class SnapshotStore:
         self._save()
         return sha
 
+    def mark_created(self, path) -> None:
+        """Register a file junk *created* (a decoy with no original).
+
+        It has no blob; :meth:`restore_key` deletes it instead of writing bytes.
+        Used for generated decoy docs (e.g. ``ARCHITECTURE.md``) so ``restore``
+        removes them cleanly rather than leaving them behind.
+        """
+        entries = self._load()["entries"]
+        entries[self.key_for(path)] = {
+            "original_sha256": None,
+            "blob": None,
+            "obfuscated_sha256": None,
+            "created": True,
+            "snapshot_at": time.time(),
+        }
+        self._save()
+
     def mark_obfuscated(self, path, obfuscated_sha: str) -> None:
         """Record the post-obfuscation hash for a snapshotted file."""
         entries = self._load()["entries"]
@@ -106,15 +123,23 @@ class SnapshotStore:
             self._save()
 
     def restore_key(self, key: str) -> bool:
-        """Restore one file by manifest key. Returns True if restored."""
+        """Restore one file by manifest key. Returns True if restored.
+
+        A normal entry has its original bytes written back; a ``created`` entry
+        (a junk-generated decoy) is deleted instead.
+        """
         entries = self._load()["entries"]
         entry = entries.get(key)
         if entry is None:
             return False
-        blob = self.blobs / entry["blob"]
         target = self.root / key
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(blob.read_bytes())
+        if entry.get("created"):
+            if target.exists():
+                target.unlink()
+        else:
+            blob = self.blobs / entry["blob"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(blob.read_bytes())
         del entries[key]
         self._save()
         return True

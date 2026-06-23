@@ -33,6 +33,16 @@ def _build_parser() -> argparse.ArgumentParser:
     o.add_argument("--bench", default=None, help="optional shell command run as an extra gate")
     o.add_argument("--seed", type=int, default=None, help="deterministic transform seed")
     o.add_argument("--dry-run", action="store_true", help="preview without writing")
+    o.add_argument(
+        "--narrative",
+        choices=("off", "template", "llm"),
+        default="off",
+        help="render one self-consistent false cover story across all files",
+    )
+    o.add_argument("--narrative-theme", default=None, help="pin a template theme (else seed-chosen)")
+    o.add_argument("--refresh-narrative", action="store_true", help="regenerate the cached narrative artifact")
+    o.add_argument("--rewrite-readme", action="store_true", help="also overwrite README.md with the cover story")
+    o.add_argument("--rename-tests", action="store_true", help="rename test_* functions to narrative vocabulary")
 
     r = sub.add_parser("restore", help="restore originals from the snapshot store")
     r.add_argument("paths", nargs="*", help="files/dirs to restore (default: all managed)")
@@ -61,6 +71,11 @@ def _do_obfuscate(args, root: Path) -> int:
         seed=seed,
         dry_run=args.dry_run,
         root=root,
+        narrative_mode=args.narrative,
+        narrative_theme=args.narrative_theme,
+        narrative_refresh=args.refresh_narrative,
+        rewrite_readme=args.rewrite_readme,
+        rename_tests=args.rename_tests,
     )
     if args.dry_run:
         if not result.ok:
