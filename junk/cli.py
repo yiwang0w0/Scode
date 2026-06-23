@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
-from junk import __version__, core, redteam as redteam_mod
+from junk import __version__, core, maze_eval as maze_eval_mod, redteam as redteam_mod
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -57,6 +57,16 @@ def _build_parser() -> argparse.ArgumentParser:
     rt.add_argument("--tests", default=None, help="shell command that must pass post-obfuscation")
     rt.add_argument("--bench", default=None, help="optional shell command run as an extra gate")
     rt.add_argument("--seed", type=int, default=None, help="base seed for the candidate search")
+
+    me = sub.add_parser(
+        "maze-eval",
+        help="measure what the obfuscated tree costs a tool-using agent (and if it's fooled)",
+    )
+    me.add_argument("paths", nargs="*", help="unused; the agent navigates the whole tree from cwd")
+    me.add_argument("--task", default=maze_eval_mod.DEFAULT_TASK, help="what to ask the agent to figure out")
+    me.add_argument("--model", default=maze_eval_mod.DEFAULT_MODEL, help="Claude model id")
+    me.add_argument("--max-turns", type=int, default=12, help="cap on agent tool-use turns")
+    me.add_argument("--baseline", action="store_true", help="also run on the clean source and report the delta")
 
     return parser
 
@@ -124,6 +134,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             tests=args.tests,
             bench=args.bench,
             base_seed=args.seed,
+            root=root,
+        )
+
+    if args.cmd == "maze-eval":
+        return maze_eval_mod.maze_eval(
+            args.paths,
+            task=args.task,
+            model=args.model,
+            max_turns=args.max_turns,
+            baseline=args.baseline,
             root=root,
         )
 
